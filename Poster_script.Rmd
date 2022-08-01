@@ -1,0 +1,442 @@
+---
+title: "VDB_Jiang_Oukkal"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Présentation du document : 
+
+Ce document R markdown regroupe les éléments l'analyse effectuée par Sara Oukkal et Xinyue Jiang sur les données issues de l'article Microbial Biogeography of Public Restroom Surfaces de Gilberto E. *et al*. 
+
+Les graphiques générés par ce script pourront être retrouvés dans notre poster (Quelques modifications ont été faites sur le script après présentation du poster : ajout d'un graphique sunburst interactif, correction d'erreurs et normalisation de la heatmap). 
+
+Vous y trouverez les étapes de préparation et formatage des données, les questions que nous nous sommes posés, les graphiques qui y répondent ainsi que les conclusions biologiques associées.
+
+Pour obtenir le visuel de R markdown il faut l'executer à partir du git ou se trouvent les données pour générer les figures. Ensuite il faut le knit (tricoter) en HTML pour avoir la mise en forme du document. 
+
+# I) Préparation des données : 
+
+## 1- Packages R : 
+```{r setup, include=TRUE}
+#Fonction pour installer et charger les packages R:
+fun_packages <- function(x){
+  for( i in x ){
+    if( ! require( i , character.only = TRUE ) ){
+      #Si le package ne peut pas être chargé, on l'installe
+      install.packages( i , dependencies = TRUE )
+      #Charger le package après l'installation
+      require( i , character.only = TRUE )
+    }
+  }
+}
+
+#Liste des packages necessaires:
+packages=c("ggplot2" , "plotly" , "data.table","datasets","stringr","tibble","plyr","reshape","ade4","viridis","tidyverse","dplyr") 
+#Lancer la fonction de chargement/installation: 
+fun_packages(packages)
+```
+
+## 2- Charger les données : 
+Le fichier **VDB_16S_metadata.txt** contient le nombre de bactéries dans chaque échantillon et **VDB_16S_dataset.txt** contient les informations qualitatives des endroits d'ou proviennent les échantillons.  
+
+```{r prétraitement_de_données}
+#Charger les fichiers : 
+data_info=read.csv("data/VDB_16S_metadata.txt", 
+                     header = TRUE, sep = "\t")
+data_OTU=read.csv("data/VDB_16S_dataset.txt", 
+                  header = TRUE, sep = "\t")
+
+head(data_info)
+head(data_OTU)
+```
+
+## 3- Formater des données :
+
+Différents traitements des données (parfois indépendants les uns des autres) pour pouvoir réaliser les graphiques du poster. 
+
+```{r prétraitement des donnees}
+#Preprocessing des données : 
+##Renommer les lignes du dataset :
+rownames(data_OTU) <- make.names(data_OTU$X.OTU.ID)
+
+##Split la colonne de taxonomie en 6 et renommer les colonnes:
+Taxonomy = data_OTU$ConsensusLineage 
+Tax_split=str_split_fixed(Taxonomy, ";", n=6)
+colnames(Tax_split) <- c("Domaine","Phylum","Classe","Ordre", "Famille", "Genre")
+tax=as.data.frame(Tax_split)
+
+##Nettoyer les noms de phyla :
+Phylum_sep=as.data.frame(str_split_fixed(tax$Phylum, "_",n=3))
+Phylum_names=Phylum_sep$V3
+
+##Obtenir les niveaux taxonomiques : 
+###Niveaux taxonomiques : 1-Domaine, 2-Phylum, 3-Classe, 4-Ordre, 5-Famille, 6-Genre
+###A partir du tableau tax retirer la colonne Genre qui est très fragmentée et incomplète : 
+Tax_trim=subset(as.data.frame(tax), select = -Genre)
+###Retirer les k__, p__ (Nettoyer les niveaux taxonomiques): 
+Tax_trim$Domaine <- gsub("k__", "" , as.character(Tax_trim$Domaine))
+Tax_trim$Phylum <- gsub("p__", "" , as.character(Tax_trim$Phylum))
+Tax_trim$Classe <- gsub("c__", "" , as.character(Tax_trim$Classe))
+Tax_trim$Ordre <- gsub("o__", "" , as.character(Tax_trim$Ordre))
+Tax_trim$Famille <- gsub("f__", "" , as.character(Tax_trim$Famille))
+###Additionner toutes les cases de chaque ligne du document data_OTU, total abondance pour chaque espèce (somme des échantillons) :
+summed <- rowSums(data_OTU[, c(2:110)])
+summed_ab <- as_tibble(summed)
+###Ajouter la colonne abondance au tableau des niveaux taxonomiques : 
+Tax_trim$Abondance = summed_ab$value
+
+##Combiner les abondances avec les données qualitatives des sources d'échantillonage :  
+###Formater les deux tableaux:
+data_reOTU=data_OTU[,-1]
+data_OTU_pret=subset(as.data.frame(data_reOTU), 
+                     select = -ConsensusLineage)
+data_transOTU=as.data.frame(t(data_OTU_pret))
+data_transOTU$SampleID=rownames(data_transOTU)
+###Fusion des deux tableaux :
+merge_data=merge(data_info,data_transOTU,by.x="SampleID",
+                 by.y="SampleID")
+#Renommer les colonnes :
+new_data=merge_data[,-c(1,2,3,4,5)]
+colnames(new_data) <- make.names(Phylum_names)
+
+```
+
+# II) Plots : 
+
+## 1- Sunburst - Niveaux taxonomiques : 
+
+**Question : Quelle est la diversité des bactéries qu'on retrouve dans les toilettes publiques ?**
+
+Ce plot sunburst interactif nous permet de visualiser les niveaux taxonomiques des bactéries retrouvées dans les échantillons issus des toilettes publiques ainsi que leur répartition en fonction de leur abondance. 
+
+Les niveaux sont :  Phylum, Classe et Ordre.  Nous n'utilisons pas les niveaux taxonomiques plus bas car ils contiennent beaucoup d'inconnus (faible résolution). 
+
+```{r sunbrust}
+#Sunburst: 
+##On retire la première colonne "Domaine" car ici tous les organismes correspondent à des bactéries. 
+prepare_sunbrust=Tax_trim[,-1]
+##On range les données par groupe (combiner les colonnes qui présentent le même Ordre) : 
+group_by_sunbrust=ddply(prepare_sunbrust, .(Phylum, Classe, Ordre), numcolwise(sum))
+
+##Faire le plot: 
+as.sunburstDF <- function(DF, valueCol = NULL){
+  require(data.table)
+  
+  colNamesDF <- names(DF)
+  
+### Vérifier si les données sont sous forme de tableau : 
+  if(is.data.table(DF)){
+    DT <- copy(DF)
+  } else {
+    DT <- data.table(DF, stringsAsFactors = FALSE)
+  }
+  
+### Déterminer les parents : 
+  DT[, root := names(DF)[1]]
+  colNamesDT <- names(DT)
+  
+  if(is.null(valueCol)){
+    setcolorder(DT, c("root", colNamesDF))
+  } else {
+    setnames(DT, valueCol, "values", skip_absent=TRUE)
+    setcolorder(DT, c("root", setdiff(colNamesDF, valueCol), "values"))
+  }
+  
+### Faire des groupes hiérarchiques pour chaque parent : 
+  hierarchyCols <- setdiff(colNamesDT, "values")
+  hierarchyList <- list()
+  for(i in seq_along(hierarchyCols)){
+    currentCols <- colNamesDT[1:i]
+    if(is.null(valueCol)){
+      currentDT <- unique(DT[, ..currentCols][, values := .N, by = currentCols], by = currentCols)
+    } else {
+      currentDT <- DT[, lapply(.SD, sum, na.rm = TRUE), by=currentCols, .SDcols = "values"]
+    }
+    setnames(currentDT, length(currentCols), "labels")
+    hierarchyList[[i]] <- currentDT
+  }
+  
+  hierarchyDT <- rbindlist(hierarchyList, use.names = TRUE, fill = TRUE)
+  
+  parentCols <- setdiff(names(hierarchyDT), c("labels", "values", valueCol))
+  hierarchyDT[, parents := apply(.SD, 1, function(x){fifelse(all(is.na(x)), yes = NA_character_, no = paste(x[!is.na(x)], sep = ":", collapse = " - "))}), .SDcols = parentCols]
+  hierarchyDT[, ids := apply(.SD, 1, function(x){paste(x[!is.na(x)], collapse = " - ")}), .SDcols = c("parents", "labels")]
+  hierarchyDT[, c(parentCols) := NULL]
+  return(hierarchyDT)
+}
+
+DF <- as.data.table(group_by_sunbrust)
+setcolorder(DF, c("Phylum", "Classe", "Ordre","Abondance"))
+sunburstDF <- as.sunburstDF(DF, valueCol = "Abondance")
+plot_ly(data = sunburstDF, ids = ~ids, labels= ~labels, parents = ~parents, values= ~values, type='sunburst', branchvalues = 'total')
+
+```
+
+## 2- Barplot - Abondance Phyla : 
+
+**Question : Y a t'il des types de bactéries plus abondants que d'autres ?**
+
+Barplot qui représente l'abondance de chaque phylum dans la somme des échantillons. 
+
+**Remarque :** Depuis la présentation du poster, nous avons inversé les axes pour qu'ils correspondent bien aux bonnes valeurs. 
+
+```{r phylum barplot}
+
+#Barplot : 
+##Formater le tableau des niveaux taxonomiques pour ne garder que les phyla et leur abondance :
+##Fusionner les lignes avec le même phylum pour additionner leurs abondances :
+
+Phylum=subset(as.data.frame(Tax_trim), select = Phylum)
+Phylum$Abondance = summed_ab$value
+Phylum_agg=aggregate(Abondance ~ Phylum, Phylum, sum)
+Phylum_agg = Phylum_agg[order(Phylum_agg$Abondance),]
+
+##Créer un vecteur avec un nombre de couleurs suffisant pour tous les Phylum: (les palettes préfaites ne présentent pas assez de couleurs)
+couleur<-c("#C4961A", "#F4EDCA", "#00AFBB", "#E7B800",
+           "#D16103", "#C3D7A4", "#52854C", "#4E84C4", "#293352",
+           "#00AFBB", "#E7B800", "#FC4E07","#FFDB6D", "#C4961A", "#F4EDCA", 
+          "#D16103", "#C3D7A4", "#52854C", "#4E84C4", "#293352","#999999", 
+          "#E69F00", "#56B4E9", "#009E73",
+          "#F0E442", "#0072B2", "#D55E00", "#CC79A7","#FFDB6D")
+
+##Faire le barplot: 
+ggplot(Phylum_agg, aes(Abondance,reorder(Phylum, +Abondance), fill=Phylum)) + 
+  scale_fill_manual(values = couleur)+
+  geom_col() +
+  theme_classic()+
+  scale_x_continuous(position="top")+
+  ggtitle("Diversité et abondance des bactéries qu'on retrouve dans les toilettes")+
+  xlab("Abondance") + 
+  ylab("Type de bactéries")+
+  theme(plot.title = element_text(size = 15),axis.text.x = element_text(angle = 45, hjust = -0.25,size=15),axis.text.y=element_text(size=15),axis.title.x= element_text(size=15),axis.title.y= element_text(size=15))
+
+```
+
+
+Forte diversité de bactéries retrouvées dans nos échantillons, néanmoins 5 groupes sont dominants en terme d'abondance :
+- Les actinobactéries et Les cyanobactéries (principalement retrouvées dans le sol)
+- Les protéobactéries ( certaines sont des pathogènes de l’Homme comme E. esherichia coli et salmonella, mais d’autres composent la flore vaginale)
+- Les firmicutes (certains sont des pathogènes de l’Homme comme Streptocuccus)
+- Les Bacteroidetes (qui sont les bactéries du microbiote intestinal). 
+
+## 3- Stacked barplot - Abondance des Phyla de bactéries sur chaque surface :
+
+**Question : Est-ce que la distribution des bactéries est équivalente sur les différentes surfaces ?**
+
+Représentation de l'abondance de bactéries des échantillons issus des différentes surfaces de toilettes publiques. Chaque baton est subdivisé en fonction du type de Phyla qu'on retrouve sur la surface correspondante. 
+
+```{r Stacked barplot, echo=FALSE}
+# Stacked Barplot : 
+##Combiner les données issues de la même surface et renommer les lignes: 
+new_data_dotplot=new_data
+aggrate_bacterie=sapply(split.default(new_data_dotplot, names(new_data_dotplot)), rowSums, na.rm = TRUE)
+##Réarranger le tableau : 
+off_data_bacterie=as.data.frame(aggrate_bacterie)
+off_data_bacterie$Surface=merge_data$Surface
+##Calculer l'abondance de chaque surface :
+aggrate_data=aggregate(. ~ Surface, data=off_data_bacterie, FUN=sum)
+##Renommer les surfaces en français: 
+aggrate_data$Surface[aggrate_data$Surface == 'Door out'] <- 'Porte ext'
+aggrate_data$Surface[aggrate_data$Surface == 'Door in'] <- 'Porte int'
+aggrate_data$Surface[aggrate_data$Surface == 'Faucet handles'] <- 'Robinet'
+aggrate_data$Surface[aggrate_data$Surface == 'Sink floor'] <- 'Lavabo'
+aggrate_data$Surface[aggrate_data$Surface == 'Soap dispenser'] <- 'Distributeur de savon'
+aggrate_data$Surface[aggrate_data$Surface == 'Stall in'] <- 'Cabine int'
+aggrate_data$Surface[aggrate_data$Surface == 'Stall out'] <- 'Cabine ext'
+aggrate_data$Surface[aggrate_data$Surface == 'Toilet Floor'] <- 'Sol des toilettes'
+aggrate_data$Surface[aggrate_data$Surface == 'Toilet flush handle'] <- "Chasse d'eau"
+aggrate_data$Surface[aggrate_data$Surface == 'Toilet seat'] <- 'Siège de toilettes'
+aggrate_data$Surface[aggrate_data$Surface == 'Water'] <- "Eau"
+rownames(aggrate_data)=make.names(aggrate_data$Surface)
+data_bar_plot=aggrate_data[,-1]
+
+##Filtrer les phyla peu abondants, retirer les abondances < 30 :
+need_to_go=Filter(function(x) sum(abs(x), na.rm = TRUE) <30, data_bar_plot)
+data_ready=data_bar_plot[, !(colnames(data_bar_plot) %in% colnames(need_to_go))]
+
+##Répartir les organismes présents sur les surfaces :
+data_ready$Surface=aggrate_data$Surface
+bacteries_melt=melt(data_ready,id=c("Surface"))
+colnames(bacteries_melt)[2] <- "Organismes"
+newdata_barplot=subset(bacteries_melt,bacteries_melt[,3]>0)
+
+##Stacked barplot :
+ggplot(newdata_barplot,aes(Surface,value, fill=Organismes)) +
+  geom_bar(stat="identity", position="stack", color="grey") +
+  scale_x_discrete(limits = c("Cabine int","Eau","Porte int","Distributeur de savon","Cabine ext","Chasse d'eau","Porte ext", "Lavabo","Siège de toilettes","Sol des toilettes", "Robinet"))+
+  theme_classic() +
+  scale_fill_brewer(palette = "Set3") +
+  ggtitle("Répartition des familles d'organismes présents sur les surfaces des toilettes")+
+  xlab("Surfaces") + 
+  ylab("Abondance des organismes")+
+  theme(plot.title = element_text(size = 15),axis.text.x = element_text(angle = 45, hjust = 1,size=15),
+        axis.text.y=element_text(size=15),axis.title.x= element_text(size=15),axis.title.y= element_text(size=15),
+        legend.key.size = unit(2,"line"),legend.title = element_text(size = 15),legend.text = element_text(size = 15))
+
+```
+
+On voit que la distribution des phyla est assez équivalente entre les surfaces sauf l’eau qui présente une composition différente.
+Les actinobactéries sont les bactéries les plus nombreuses, sauf dans l’eau ou on en retrouve très peu. Cette différence de l’eau par rapport aux autres milieu vient du fait que c’est le seul échantillon qui n’est pas en contact avec l’Homme. 
+
+Quant à l’abondance des bactéries sur ces surfaces, elle est assez variable, avec le robinet qui présente la plus grande quantité de bactéries car c’est l’endroit qu’on touche le plus longtemps.
+
+## 4- Analyse en composante principale - Explication de la variation présente entre surfaces et composition bactérienne :
+
+**Question : Est-ce que ces organismes proviennent tous du même milieu ou d’environnements différents ?**
+
+On regroupe les surfaces en 4 groupes: Les surfaces touchées par les mains, le sol touché par les chaussures, la cuvette des toilettes et l'eau. 
+Les bactéries sont regroupées par familles.  
+
+```{r ACP}
+#ACP : 
+##On récupère les abondances de chaque échantillon pour chaque famille de bactéries: 
+colnames(new_data) <- make.names(Tax_trim$Famille)
+data_foracp=new_data
+
+##Renommer les surfaces en 4 groupes (Mains, sol, toilettes et eau) : 
+data_foracp$NewSurface[merge_data$Surface == 'Door out'] <- "Mains"
+data_foracp$NewSurface[merge_data$Surface == 'Door in'] <- "Mains"
+data_foracp$NewSurface[merge_data$Surface == 'Faucet handles'] <- "Mains"
+data_foracp$NewSurface[merge_data$Surface == 'Sink floor'] <- "Mains"
+data_foracp$NewSurface[merge_data$Surface == 'Soap dispenser'] <- "Mains"
+data_foracp$NewSurface[merge_data$Surface == 'Stall in'] <- "Mains"
+data_foracp$NewSurface[merge_data$Surface == 'Stall out'] <- "Mains"
+data_foracp$NewSurface[merge_data$Surface == 'Toilet Floor'] <- "Sol"
+data_foracp$NewSurface[merge_data$Surface == 'Toilet flush handle'] <- "Mains"
+data_foracp$NewSurface[merge_data$Surface == 'Toilet seat'] <- "Toilettes"
+data_foracp$NewSurface[merge_data$Surface == "Water"] <- "Eau"
+
+##Calculer l'ACP: 
+rownames(data_foracp)=make.names(data_foracp$NewSurface,unique=T)
+data_acp=subset(data_foracp,select=-NewSurface)
+acp <- prcomp(data_acp, center = TRUE, scale = TRUE)
+data_pca=data.frame(acp$x,data_foracp$NewSurface)
+###Choisir la dimension à représenter: (Nous avons 108 facteurs qui expliquent la variabilité, choisir deux facteurs qui expliquent une bonne partie de la variabilité)
+new_df <- cbind(data_foracp$NewSurface,data_pca[,c(2,22)])
+###Renommer les colonnes des résultats de l'ACP : 
+colnames(new_df) <- c("Source_de_echantillon", "Facteur1", "Facteur2")
+
+##Faire le plot : 
+ggplot(new_df, aes(x=Facteur1, y=Facteur2, col = Source_de_echantillon, 
+                            fill = data_foracp$NewSurface))+
+  stat_ellipse(geom = "polygon", col= "black", alpha =0.5)+
+  geom_point(shape=21, col="black")+
+  xlim(-50,50)+
+  ylim(-50,50)+
+  ggtitle("Analyse en composante principale sur ce qui touche les surfaces 
+          et les familles de bactéries associées")+
+  xlab("Facteur 1") + 
+  ylab("Facteur 2")+
+  guides(fill=guide_legend(title="Sources de l'échantillon"))+
+  theme_bw() +
+  theme_light()+
+  theme(aspect.ratio=1)+
+  theme(plot.title = element_text(size = 15),axis.text.x = element_text(size=15),axis.text.y=element_text(size=15),axis.title.x= element_text(size=15),axis.title.y= element_text(size=15))
+
+```
+
+On peut distinguer deux groupes différents : 
+- Les bactéries associées à l'Homme, qui sont les plus abondantes provenant probablement du microbiote de la peau et du microbiote intestinal. 
+- les bactéries associées à l’environnement qui sont les plus diversifiéet qui correspondent à des bactéries du sol.
+
+## 5- Heatmap - Abondance des bactéries en fonction :
+
+**Question : Est-ce qu’il y a des toilettes qui ont plus de bactéries que les autres ? Est ce que l’endroit d'où provient l’échantillon influence les résultats ?** 
+
+**Remarque :** Depuis la présentation du poster, nous avons modifié les données utilisées pour faire la heatmap en normalisant les valeurs d'abondance par type de bactéries (pour pas que les bactéries très abondantes masquent la variabilité qu'on peut retrouver chez les bactéries moins abondantes)
+
+```{r Heatmap}
+#Préparation des données pour le plot
+data_heatmap=as.data.frame(aggrate_bacterie)
+## Filtrer les bactéries qui présentent une trop faible abondance : 
+need_to_go_heat=Filter(function(x) sum(abs(x), na.rm = TRUE) < 1000, data_heatmap)
+data_ready_heat=data_heatmap[, !(colnames(data_heatmap) %in% colnames(need_to_go_heat))]
+
+## Ajouter les paramètres de la heatmap : 
+data_ready_heat$Gender=merge_data$Gender
+data_ready_heat$Floor=merge_data$Floor
+data_ready_heat$Building=merge_data$Building
+
+## Traduire le genre en français : 
+data_ready_heat$Gender[data_ready_heat$Gender == "Female"]  <- "Femme"
+data_ready_heat$Gender[data_ready_heat$Gender == "Male"] <- "Homme"
+
+## Regrouper les données en fonction des 3 paramètres :  
+data_group_by=data_ready_heat %>%
+  group_by( Gender, Building, Floor) %>%
+  summarise_all(sum)
+
+## Réorganiser le tableau
+data_heat_pret=as.data.frame(data_group_by)
+data_heat_pret$Info <- paste(data_heat_pret[,1], data_heat_pret[,2], data_heat_pret[,3], sep="_")
+rownames(data_heat_pret)=make.names(data_heat_pret$Info,unique=T)
+
+## Supprimer les colonnes dont on ne se sert pas : 
+pret_heat=data_heat_pret[, !(colnames(data_heat_pret) %in% c("Gender","Floor","Building"))]
+
+## Fusionner les données d'abondance avec les informations : 
+info_melt=melt(pret_heat,id=c("Info"))
+
+## Retirer les localisations qui ne sont pas des toilettes pour hommes ou femmes : 
+info_melt=info_melt[info_melt$Info != "None_Ekeley_A" 
+          & info_melt$Info != "None_Ekeley_B" 
+          & info_melt$Info != "None_Ekeley_C"  
+          & info_melt$Info != "None_Porter_A" 
+          & info_melt$Info != "None_Porter_B" 
+          & info_melt$Info != "None_Porter_C", ]
+
+## Normaliser les valeurs d'abondance par type de bactérie : 
+getNorm <- function(data){
+  datalist<-list()
+  types<-unique(data$variable)
+  i=0
+  for (type in types){
+    i=i+1
+    subset<-subset(data, variable==type)
+    line_max_abun <- subset %>%
+      filter(value == max(value, na.rm = TRUE))
+    max_abun<-line_max_abun$value
+    subset$NormAbundance<-subset$value/max_abun
+    
+    datalist[[i]] <- subset
+  }
+  newData <- do.call(rbind, datalist)
+  return(newData)
+}
+
+info_melt_norm<-getNorm(info_melt)
+
+#Séparer les données de Genre des informations de localisation (pas très propre pourrait être fait en amont)
+temporary_df=as.data.frame(str_split_fixed(info_melt_norm$Info, "_", n=2) )
+info_melt_norm$Info=temporary_df$V2
+info_melt_norm$Gender=temporary_df$V1
+
+
+##Plot heatmap :
+ggp_heatmap <- ggplot(info_melt_norm, aes(Info, variable)) + 
+  geom_tile(aes(fill = NormAbundance))+
+  scale_fill_viridis_c(option = "D", direction = 1)+
+  theme(plot.title = element_text(size = 15),axis.text.x = element_text(angle = 45, hjust = 1),axis.text.y=element_text(size=15),axis.title.x= element_text(size=15),axis.title.y= element_text(size=15))+
+  facet_grid(. ~ Gender )+
+  ggtitle("Répartition des types de bactéries dans les échantillons issus de toilettes différentes ")+
+  xlab("Provenance des échantillons") + 
+  ylab("Abondance des bactéries ")
+
+ggp_heatmap
+```
+
+Les toilettes pour hommes présentent plus d’Actinobactéries
+mais les toilettes pour femmes présentent plus de Protéobactéries (qui sont des bactéries qui composent 25% de la flore vaginale) et de Fusobactéries. 
+
+Malheureusement nous n’avons pas les noms des espèces car ils permettraient d’avoir des conclusions biologiques sur la raison de cette différence entre Hommes et Femmes qui peut venir de différences de microbiotes. 
+
+On voit aussi que l’immeuble Porter est plus propre que Ekeley au moment ou les échantillons ont été prélevés, que ce soit aux toilettes pour Hommes ou pour femmes les toilettes de l'immeuble Porter présentent moins d'abondance de bactéries que Ekeley. 
+
+Donc l’abondance en bactéries varie en fonction des toilettes échantillonnées.
+
+# Conclusion :
+
+Ces résultats montrent que les échantillons des toilettes abritent des groupes de bactéries diverses parmi lesquels on distingue deux grandes communautés : les bactéries associées à l’Humain et celles associées à l’environnement.
+
+Malheureusement la résolution taxonomique de l’étude ne permet pas d’attester des différences réelles entre les échantillons et donc de faire des conclusions biologiques.
